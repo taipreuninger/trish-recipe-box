@@ -18,6 +18,9 @@
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
+    <!-- HEIC / HEIF Image Converter for iPhone & iPad Photos -->
+    <script src="https://unpkg.com/heic2any@0.0.4/dist/heic2any.min.js"></script>
+
     <script>
         tailwind.config = {
             theme: {
@@ -160,7 +163,7 @@
             const [importTab, setImportTab] = useState('photo');
             
             // Custom Alert / Notification Modal State
-            const [notice, setNotice] = useState(null); // { message, title }
+            const [notice, setNotice] = useState(null);
             const [deleteConfirmRecipeId, setDeleteConfirmRecipeId] = useState(null);
 
             // AI Extraction State
@@ -205,9 +208,12 @@
                 const imagesArray = Array.isArray(base64Images) ? base64Images : [base64Images].filter(Boolean);
 
                 imagesArray.forEach(img => {
+                    let mimeType = "image/jpeg";
+                    if (img.startsWith("data:image/png")) mimeType = "image/png";
+                    if (img.startsWith("data:image/webp")) mimeType = "image/webp";
                     parts.push({
                         inlineData: {
-                            mimeType: "image/jpeg",
+                            mimeType: mimeType,
                             data: img.split(',')[1] || img
                         }
                     });
@@ -281,20 +287,42 @@ Return ONLY a valid JSON object matching this structure:
                 return `https://placehold.co/800x600/fdebe0/e05a47?text=${encodeURIComponent(title)}`;
             };
 
-            const handleImageUpload = (e, setImageSetter) => {
+            const handleImageUpload = async (e, setImageSetter) => {
                 const file = e.target.files[0];
-                if (file) {
-                    const reader = new FileReader();
-                    reader.onloadend = () => setImageSetter(reader.result);
-                    reader.readAsDataURL(file);
+                if (!file) return;
+
+                let fileToRead = file;
+
+                // Check for iPhone / iPad HEIC or HEIF files
+                const isHeic = file.type.includes('heic') || file.type.includes('heif') || 
+                               file.name.toLowerCase().endsWith('.heic') || file.name.toLowerCase().endsWith('.heif');
+
+                if (isHeic) {
+                    try {
+                        setProcessingStatus('📱 Converting iPhone HEIC photo...');
+                        if (window.heic2any) {
+                            const convertedBlob = await window.heic2any({
+                                blob: file,
+                                toType: 'image/jpeg',
+                                quality: 0.85
+                            });
+                            fileToRead = Array.isArray(convertedBlob) ? convertedBlob[0] : convertedBlob;
+                        }
+                    } catch (conversionErr) {
+                        console.warn("HEIC Conversion note:", conversionErr);
+                    }
                 }
+
+                const reader = new FileReader();
+                reader.onloadend = () => setImageSetter(reader.result);
+                reader.readAsDataURL(fileToRead);
             };
 
             const handleExtractRecipe = async () => {
                 if (!userApiKey.trim()) {
                     showAlert(
                         "AI Scanning requires a Google Gemini API Key. Tap the ⚙️ Settings button at top right to enter a key, or click 'Review & Save' to fill in the recipe manually!",
-                        "API Key Required"
+                        "API Key Optional"
                     );
                     setImportTab('manual');
                     return;
@@ -491,6 +519,7 @@ Return ONLY a valid JSON object matching this structure:
                             )}
                         </div>
 
+                        {}
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                             <div className="flex gap-2 overflow-x-auto no-scrollbar py-1 flex-1">
                                 {CATEGORIES.map(cat => (
@@ -540,6 +569,7 @@ Return ONLY a valid JSON object matching this structure:
                         </div>
                     </div>
 
+                    {}
                     {filteredRecipes.length === 0 ? (
                         <div className="bg-white rounded-3xl p-10 text-center border border-dashed border-slate-300">
                             <div className="text-5xl mb-3">📖</div>
@@ -648,7 +678,7 @@ Return ONLY a valid JSON object matching this structure:
                         </div>
                     )}
 
-                    {/* SETTINGS MODAL */}
+                    {}
                     {isSettingsOpen && (
                         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex justify-center items-center p-4">
                             <div className="bg-white w-full max-w-md rounded-3xl shadow-2xl p-6 border border-slate-100 space-y-4">
@@ -691,7 +721,7 @@ Return ONLY a valid JSON object matching this structure:
                         </div>
                     )}
 
-                    {/* ADD / EDIT RECIPE MODAL */}
+                    {}
                     {isAddModalOpen && (
                         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex justify-center items-center p-3 sm:p-4 overflow-y-auto">
                             <div className="bg-white w-full max-w-2xl rounded-3xl shadow-2xl overflow-hidden my-auto border border-slate-100 flex flex-col max-h-[90vh]">
@@ -745,7 +775,7 @@ Return ONLY a valid JSON object matching this structure:
                                     {!editingRecipeId && importTab === 'photo' && (
                                         <div className="space-y-4">
                                             <p className="text-xs sm:text-sm text-slate-600 font-medium">
-                                                Take or upload photos of your physical recipe card (Front and optional Back). Trish's AI assistant will extract all ingredients and steps automatically!
+                                                Take or upload photos of your physical recipe card (Front and optional Back). Trish's AI assistant will extract all ingredients and steps automatically! Supports iPhone HEIC photos.
                                             </p>
 
                                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -760,7 +790,7 @@ Return ONLY a valid JSON object matching this structure:
                                                             <div className="flex gap-2 justify-center">
                                                                 <label className="bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold px-3 py-1.5 rounded-xl text-xs cursor-pointer">
                                                                     Retake
-                                                                    <input type="file" accept="image/*" onChange={(e) => handleImageUpload(e, setFrontImage)} className="hidden" />
+                                                                    <input type="file" accept="image/*,.heic,.heif" onChange={(e) => handleImageUpload(e, setFrontImage)} className="hidden" />
                                                                 </label>
                                                                 <button type="button" onClick={() => setFrontImage(null)} className="text-red-600 font-bold text-xs px-2 py-1.5 cursor-pointer">Remove</button>
                                                             </div>
@@ -774,7 +804,7 @@ Return ONLY a valid JSON object matching this structure:
                                                             <span className="text-xs text-slate-500 block">
                                                                 Title & ingredients side
                                                             </span>
-                                                            <input type="file" accept="image/*" onChange={(e) => handleImageUpload(e, setFrontImage)} className="hidden" />
+                                                            <input type="file" accept="image/*,.heic,.heif" onChange={(e) => handleImageUpload(e, setFrontImage)} className="hidden" />
                                                         </label>
                                                     )}
                                                 </div>
@@ -790,7 +820,7 @@ Return ONLY a valid JSON object matching this structure:
                                                             <div className="flex gap-2 justify-center">
                                                                 <label className="bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold px-3 py-1.5 rounded-xl text-xs cursor-pointer">
                                                                     Retake
-                                                                    <input type="file" accept="image/*" onChange={(e) => handleImageUpload(e, setBackImage)} className="hidden" />
+                                                                    <input type="file" accept="image/*,.heic,.heif" onChange={(e) => handleImageUpload(e, setBackImage)} className="hidden" />
                                                                 </label>
                                                                 <button type="button" onClick={() => setBackImage(null)} className="text-red-600 font-bold text-xs px-2 py-1.5 cursor-pointer">Remove</button>
                                                             </div>
@@ -804,7 +834,7 @@ Return ONLY a valid JSON object matching this structure:
                                                             <span className="text-xs text-slate-500 block">
                                                                 Continued steps or notes
                                                             </span>
-                                                            <input type="file" accept="image/*" onChange={(e) => handleImageUpload(e, setBackImage)} className="hidden" />
+                                                            <input type="file" accept="image/*,.heic,.heif" onChange={(e) => handleImageUpload(e, setBackImage)} className="hidden" />
                                                         </label>
                                                     )}
                                                 </div>
@@ -826,6 +856,7 @@ Return ONLY a valid JSON object matching this structure:
                                         </div>
                                     )}
 
+                                    {}
                                     {!editingRecipeId && importTab === 'link' && (
                                         <div className="space-y-4">
                                             <div>
@@ -855,6 +886,7 @@ Return ONLY a valid JSON object matching this structure:
                                         </div>
                                     )}
 
+                                    {}
                                     {(editingRecipeId || importTab === 'manual') && (
                                         <form onSubmit={handleSaveRecipe} className="space-y-4">
                                             <div>
@@ -989,7 +1021,7 @@ Return ONLY a valid JSON object matching this structure:
                         </div>
                     )}
 
-                    {/* VIEW RECIPE MODAL */}
+                    {}
                     {activeRecipe && !isKitchenMode && (
                         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-40 flex justify-center p-2 sm:p-4 overflow-y-auto">
                             <div className="bg-white w-full max-w-3xl rounded-3xl shadow-2xl overflow-hidden my-auto border border-slate-100 relative">
@@ -1114,6 +1146,7 @@ Return ONLY a valid JSON object matching this structure:
                         </div>
                     )}
 
+                    {}
                     {activeRecipe && isKitchenMode && (
                         <KitchenMode 
                             recipe={activeRecipe} 
