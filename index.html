@@ -26,7 +26,7 @@
             theme: {
                 extend: {
                     fontFamily: {
-                        sans: ['"Google Sans"', '"Plus Jakarta Sans"', 'Outfit', 'sans-serif'],
+                        sans: ['"Plus Jakarta Sans"', 'Outfit', 'sans-serif'],
                     },
                     colors: {
                         brand: {
@@ -48,7 +48,7 @@
     <style>
         body {
             background-color: #FAF7F2;
-            font-family: 'Google Sans', 'Plus Jakarta Sans', 'Outfit', sans-serif;
+            font-family: 'Plus Jakarta Sans', 'Outfit', sans-serif;
             -webkit-tap-highlight-color: transparent;
         }
         .no-scrollbar::-webkit-scrollbar {
@@ -64,7 +64,7 @@
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect } = React;
+        const { useState, useEffect, useRef } = React;
 
         const CATEGORIES = [
             "All",
@@ -140,10 +140,55 @@
             }
         ];
 
+        const parseRecipeTextClientSide = (rawText) => {
+            if (!rawText) return null;
+            const lines = rawText.split('\n').map(l => l.trim()).filter(Boolean);
+            if (lines.length === 0) return null;
+
+            let title = lines[0].replace(/^[#\*\-]+\s*/, '');
+            let ingredients = [];
+            let instructions = [];
+            let currentMode = 'unknown';
+
+            for (let i = 1; i < lines.length; i++) {
+                const line = lines[i];
+                const lower = line.toLowerCase();
+
+                if (lower.includes('ingredient') || lower.startsWith('what you need')) {
+                    currentMode = 'ingredients';
+                    continue;
+                } else if (lower.includes('instruction') || lower.includes('direction') || lower.includes('method') || lower.includes('step')) {
+                    currentMode = 'instructions';
+                    continue;
+                }
+
+                if (currentMode === 'ingredients' || (/^\d|\/|tsp|tbsp|cup|lb|oz|g|ml|pinch|dash/i.test(line) && currentMode !== 'instructions')) {
+                    ingredients.push(line.replace(/^[•\*\-\d\.\)]+\s*/, ''));
+                } else if (currentMode === 'instructions' || (/^\d+[\.\)]\s*/.test(line) || currentMode === 'unknown')) {
+                    instructions.push(line.replace(/^\d+[\.\)]\s*/, ''));
+                }
+            }
+
+            return {
+                title: title || "New Recipe",
+                category: "Main Dishes",
+                prepTime: "15 mins",
+                cookTime: "25 mins",
+                servings: "4 servings",
+                description: "Extracted recipe from text.",
+                ingredients: ingredients.length > 0 ? ingredients : lines.slice(1, Math.min(6, lines.length)),
+                instructions: instructions.length > 0 ? instructions : lines.slice(Math.min(6, lines.length))
+            };
+        };
+
         function App() {
             const [recipes, setRecipes] = useState(() => {
-                const saved = localStorage.getItem('trish_recipes');
-                return saved ? JSON.parse(saved) : INITIAL_RECIPES;
+                try {
+                    const saved = localStorage.getItem('trish_recipes');
+                    return saved ? JSON.parse(saved) : INITIAL_RECIPES;
+                } catch(e) {
+                    return INITIAL_RECIPES;
+                }
             });
 
             const [userApiKey, setUserApiKey] = useState(() => {
@@ -161,13 +206,12 @@
             const [editingRecipeId, setEditingRecipeId] = useState(null);
             const [isSettingsOpen, setIsSettingsOpen] = useState(false);
             const [importTab, setImportTab] = useState('photo');
-            const [showReferenceCard, setShowReferenceCard] = useState(true);
             
-            // Custom Alert / Notification Modal State
+            // Custom Alert & Delete Confirm State
             const [notice, setNotice] = useState(null);
             const [deleteConfirmRecipeId, setDeleteConfirmRecipeId] = useState(null);
 
-            // Processing State
+            // AI Extraction State
             const [isProcessing, setIsProcessing] = useState(false);
             const [processingStatus, setProcessingStatus] = useState('');
             const [pastedLinkOrText, setPastedLinkOrText] = useState('');
@@ -187,11 +231,17 @@
             });
 
             useEffect(() => {
-                localStorage.setItem('trish_recipes', JSON.stringify(recipes));
+                try {
+                    localStorage.setItem('trish_recipes', JSON.stringify(recipes));
+                } catch(e) {
+                    console.warn("LocalStorage full or disabled:", e);
+                }
             }, [recipes]);
 
             useEffect(() => {
-                localStorage.setItem('trish_gemini_api_key', userApiKey);
+                try {
+                    localStorage.setItem('trish_gemini_api_key', userApiKey);
+                } catch(e) {}
             }, [userApiKey]);
 
             const showAlert = (message, title = "Notice") => {
@@ -199,9 +249,11 @@
             };
 
             const callGeminiVisionOrText = async (prompt, base64Images = []) => {
-                if (!userApiKey.trim()) return null;
+                if (!userApiKey.trim()) {
+                    throw new Error("NO_API_KEY");
+                }
 
-                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${userApiKey.trim()}`;
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${userApiKey.trim()}`;
 
                 const parts = [{ text: prompt }];
                 const imagesArray = Array.isArray(base64Images) ? base64Images : [base64Images].filter(Boolean);
@@ -252,98 +304,143 @@ Return ONLY a valid JSON object matching this structure:
                 return JSON.parse(jsonText);
             };
 
+            const generateFoodImage = (title, category) => {
+                const keyword = encodeURIComponent(`${title} food ${category}`);
+                return `https://source.unsplash.com/featured/800x600/?${keyword},food,dish`;
+            };
+
             const handleImageUpload = async (e, setImageSetter) => {
-                const file = e.target.files && e.target.files[0];
+                const file = e.target.files[0];
                 if (!file) return;
 
                 let fileToRead = file;
-                const fileName = (file.name || '').toLowerCase();
-                const fileType = (file.type || '').toLowerCase();
-
-                // Check for iPhone / iPad HEIC or HEIF files
-                const isHeic = fileType.includes('heic') || fileType.includes('heif') || 
-                               fileName.endsWith('.heic') || fileName.endsWith('.heif');
+                const isHeic = file.type.includes('heic') || file.type.includes('heif') || 
+                               file.name.toLowerCase().endsWith('.heic') || file.name.toLowerCase().endsWith('.heif');
 
                 if (isHeic) {
-                    setIsProcessing(true);
-                    setProcessingStatus('📱 Processing iPhone HEIC photo...');
                     try {
+                        setProcessingStatus('📱 Converting iPhone photo...');
                         if (window.heic2any) {
                             const convertedBlob = await window.heic2any({
                                 blob: file,
                                 toType: 'image/jpeg',
-                                quality: 0.85
+                                quality: 0.8
                             });
                             fileToRead = Array.isArray(convertedBlob) ? convertedBlob[0] : convertedBlob;
                         }
                     } catch (conversionErr) {
                         console.warn("HEIC Conversion note:", conversionErr);
-                    } finally {
-                        setIsProcessing(false);
-                        setProcessingStatus('');
                     }
                 }
 
                 const reader = new FileReader();
                 reader.onloadend = () => {
-                    const resultUrl = reader.result;
-                    setImageSetter(resultUrl);
-                    // Automatically attach photo as the recipe image
-                    setFormData(prev => ({
-                        ...prev,
-                        imageUrl: prev.imageUrl || resultUrl
-                    }));
+                    const img = new Image();
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        const ctx = canvas.getContext('2d');
+                        const maxDim = 1024;
+                        let w = img.width;
+                        let h = img.height;
+                        if (w > maxDim || h > maxDim) {
+                            if (w > h) {
+                                h = Math.round((h * maxDim) / w);
+                                w = maxDim;
+                            } else {
+                                w = Math.round((w * maxDim) / h);
+                                h = maxDim;
+                            }
+                        }
+                        canvas.width = w;
+                        canvas.height = h;
+                        ctx.drawImage(img, 0, 0, w, h);
+                        setImageSetter(canvas.toDataURL('image/jpeg', 0.82));
+                    };
+                    img.src = reader.result;
                 };
                 reader.readAsDataURL(fileToRead);
             };
 
-            const handleContinueWithPhoto = async () => {
-                const cardPhoto = frontImage || backImage;
-                if (!cardPhoto) {
-                    showAlert("Please select or take a photo of your recipe card first!");
-                    return;
-                }
+            const handleExtractRecipe = async () => {
+                setIsProcessing(true);
+                setProcessingStatus('🔍 Processing recipe details...');
 
-                // Attach card photo as the main recipe image if none is set
-                setFormData(prev => ({
-                    ...prev,
-                    imageUrl: prev.imageUrl || cardPhoto
-                }));
+                try {
+                    let extracted = null;
 
-                // If user has an API Key set in settings, attempt background AI extraction
-                if (userApiKey.trim()) {
-                    setIsProcessing(true);
-                    setProcessingStatus('🔍 Auto-filling details with AI...');
-                    try {
-                        const photosToAnalyze = [frontImage, backImage].filter(Boolean);
-                        const extracted = await callGeminiVisionOrText(
-                            "Extract all recipe details from these photos of a recipe card. Combine all ingredients and steps.",
-                            photosToAnalyze
-                        );
-
-                        if (extracted) {
-                            setFormData(prev => ({
-                                title: extracted.title || prev.title,
-                                category: CATEGORIES.includes(extracted.category) ? extracted.category : prev.category,
-                                prepTime: extracted.prepTime || prev.prepTime,
-                                cookTime: extracted.cookTime || prev.cookTime,
-                                servings: extracted.servings || prev.servings,
-                                imageUrl: cardPhoto || extracted.imageUrl || prev.imageUrl,
-                                description: extracted.description || prev.description,
-                                ingredientsText: Array.isArray(extracted.ingredients) ? extracted.ingredients.join('\n') : prev.ingredientsText,
-                                instructionsText: Array.isArray(extracted.instructions) ? extracted.instructions.join('\n') : prev.instructionsText
-                            }));
+                    if (userApiKey.trim()) {
+                        if (importTab === 'photo' && (frontImage || backImage)) {
+                            setProcessingStatus('📸 Reading card photos with AI...');
+                            const photosToAnalyze = [frontImage, backImage].filter(Boolean);
+                            extracted = await callGeminiVisionOrText(
+                                "Extract all recipe details from these photos of a recipe card, screenshot, or page. Combine all ingredients and steps from both images into one complete recipe.",
+                                photosToAnalyze
+                            );
+                        } else if (importTab === 'link' && pastedLinkOrText) {
+                            setProcessingStatus('🌐 Extracting recipe text...');
+                            extracted = await callGeminiVisionOrText(
+                                `Extract all recipe details from the following content:\n\n${pastedLinkOrText}`
+                            );
                         }
-                    } catch (err) {
-                        console.log("Optional AI auto-fill skipped.");
-                    } finally {
-                        setIsProcessing(false);
-                        setProcessingStatus('');
+                    } else {
+                        // Smart client-side fallback if no API key is provided
+                        if (importTab === 'link' && pastedLinkOrText) {
+                            setProcessingStatus('⚡ Smart-parsing text...');
+                            extracted = parseRecipeTextClientSide(pastedLinkOrText);
+                        } else if (importTab === 'photo') {
+                            showAlert("To scan photos with AI vision, please enter a free Gemini API Key in Settings (⚙️). Or use Review & Save to type your recipe manually!", "API Key Needed for Photos");
+                            setImportTab('manual');
+                            setIsProcessing(false);
+                            return;
+                        }
                     }
-                }
 
-                // Smoothly navigate directly to Review & Save with card photo displayed at top
-                setImportTab('manual');
+                    if (extracted) {
+                        let img = frontImage || backImage || extracted.imageUrl || generateFoodImage(extracted.title || 'Recipe', extracted.category || 'Main Dishes');
+
+                        setFormData({
+                            title: extracted.title || '',
+                            category: CATEGORIES.includes(extracted.category) ? extracted.category : 'Main Dishes',
+                            prepTime: extracted.prepTime || '15 mins',
+                            cookTime: extracted.cookTime || '25 mins',
+                            servings: extracted.servings || '4 servings',
+                            imageUrl: img,
+                            description: extracted.description || '',
+                            ingredientsText: Array.isArray(extracted.ingredients) ? extracted.ingredients.join('\n') : (extracted.ingredients || ''),
+                            instructionsText: Array.isArray(extracted.instructions) ? extracted.instructions.join('\n') : (extracted.instructions || '')
+                        });
+                        setImportTab('manual');
+                    }
+                } catch (err) {
+                    if (err.message === "NO_API_KEY") {
+                        // Fallback attempt for text
+                        if (pastedLinkOrText) {
+                            const fallback = parseRecipeTextClientSide(pastedLinkOrText);
+                            if (fallback) {
+                                setFormData({
+                                    title: fallback.title,
+                                    category: fallback.category,
+                                    prepTime: fallback.prepTime,
+                                    cookTime: fallback.cookTime,
+                                    servings: fallback.servings,
+                                    imageUrl: generateFoodImage(fallback.title, fallback.category),
+                                    description: fallback.description,
+                                    ingredientsText: fallback.ingredients.join('\n'),
+                                    instructionsText: fallback.instructions.join('\n')
+                                });
+                                setImportTab('manual');
+                            }
+                        } else {
+                            showAlert("Please enter your free Google Gemini API Key in Settings (⚙️) to scan photos!", "API Key Required");
+                        }
+                    } else {
+                        showAlert("We parsed what we could! You can adjust or complete any details below in Review & Save.");
+                        setImportTab('manual');
+                    }
+                } finally {
+                    setIsProcessing(false);
+                    setProcessingStatus('');
+                }
             };
 
             const handleEditRecipe = (recipe) => {
@@ -366,11 +463,10 @@ Return ONLY a valid JSON object matching this structure:
             const handleSaveRecipe = (e) => {
                 e.preventDefault();
                 if (!formData.title.trim()) {
-                    showAlert("Please enter a recipe title.");
+                    showAlert("Please enter a title for your recipe.");
                     return;
                 }
 
-                const cardPhoto = frontImage || backImage;
                 const recipeData = {
                     id: editingRecipeId || ('recipe-' + Date.now()),
                     title: formData.title,
@@ -378,7 +474,7 @@ Return ONLY a valid JSON object matching this structure:
                     prepTime: formData.prepTime || '15 mins',
                     cookTime: formData.cookTime || '20 mins',
                     servings: formData.servings || '4 servings',
-                    imageUrl: formData.imageUrl || cardPhoto || `https://placehold.co/800x600/fdebe0/e05a47?text=${encodeURIComponent(formData.title)}`,
+                    imageUrl: formData.imageUrl || generateFoodImage(formData.title, formData.category),
                     description: formData.description,
                     ingredients: formData.ingredientsText.split('\n').filter(line => line.trim().length > 0),
                     instructions: formData.instructionsText.split('\n').filter(line => line.trim().length > 0)
@@ -420,9 +516,41 @@ Return ONLY a valid JSON object matching this structure:
             const confirmDeleteRecipe = () => {
                 if (deleteConfirmRecipeId) {
                     setRecipes(recipes.filter(r => r.id !== deleteConfirmRecipeId));
-                    setActiveRecipe(null);
+                    if (activeRecipe && activeRecipe.id === deleteConfirmRecipeId) {
+                        setActiveRecipe(null);
+                    }
                     setDeleteConfirmRecipeId(null);
                 }
+            };
+
+            const handleExportBackup = () => {
+                const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(recipes, null, 2));
+                const downloadAnchor = document.createElement('a');
+                downloadAnchor.setAttribute("href", dataStr);
+                downloadAnchor.setAttribute("download", `trish_recipe_box_backup_${new Date().toISOString().slice(0,10)}.json`);
+                document.body.appendChild(downloadAnchor);
+                downloadAnchor.click();
+                downloadAnchor.remove();
+            };
+
+            const handleImportBackup = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (evt) => {
+                    try {
+                        const imported = JSON.parse(evt.target.result);
+                        if (Array.isArray(imported)) {
+                            setRecipes(imported);
+                            showAlert(`Successfully restored ${imported.length} recipes!`, "Backup Restored");
+                        } else {
+                            showAlert("Invalid backup file format.", "Import Error");
+                        }
+                    } catch(err) {
+                        showAlert("Could not parse JSON backup file.", "Import Error");
+                    }
+                };
+                reader.readAsText(file);
             };
 
             const filteredRecipes = recipes.filter(r => {
@@ -451,7 +579,7 @@ Return ONLY a valid JSON object matching this structure:
                             <button
                                 onClick={() => setIsSettingsOpen(true)}
                                 className="p-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-2xl font-bold transition-all cursor-pointer text-lg"
-                                title="Settings"
+                                title="Settings & Backup"
                             >
                                 ⚙️
                             </button>
@@ -466,7 +594,7 @@ Return ONLY a valid JSON object matching this structure:
                         </div>
                     </header>
 
-                    {/* SEARCH & CATEGORY FILTERS */}
+                    {}
                     <div className="space-y-4 mb-6">
                         <div className="relative">
                             <input 
@@ -535,7 +663,7 @@ Return ONLY a valid JSON object matching this structure:
                         </div>
                     </div>
 
-                    {/* RECIPE LIST DISPLAY */}
+                    {}
                     {filteredRecipes.length === 0 ? (
                         <div className="bg-white rounded-3xl p-10 text-center border border-dashed border-slate-300">
                             <div className="text-5xl mb-3">📖</div>
@@ -562,7 +690,7 @@ Return ONLY a valid JSON object matching this structure:
                                             alt={recipe.title}
                                             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                                             onError={(e) => {
-                                                e.target.src = `https://placehold.co/800x600/fdebe0/e05a47?text=${encodeURIComponent(recipe.title)}`;
+                                                e.target.src = generateFoodImage(recipe.title, recipe.category);
                                             }}
                                         />
                                         <span className="absolute top-3 left-3 bg-white/95 backdrop-blur-sm text-slate-800 text-xs font-bold px-3 py-1.5 rounded-full shadow-sm">
@@ -584,7 +712,7 @@ Return ONLY a valid JSON object matching this structure:
 
                                         <div className="flex items-center justify-between text-xs sm:text-sm font-semibold text-slate-500 border-t border-slate-100 pt-3 mt-2">
                                             <div className="flex items-center gap-1">
-                                                <span>⏱️</span> {recipe.cookTime || recipe.prepTime}
+                                                <span>⏱️️</span> {recipe.cookTime || recipe.prepTime}
                                             </div>
                                             <div className="flex items-center gap-1 text-brand-600 font-bold">
                                                 View Recipe →
@@ -608,7 +736,7 @@ Return ONLY a valid JSON object matching this structure:
                                             alt={recipe.title}
                                             className="w-16 h-16 sm:w-20 sm:h-20 rounded-xl object-cover shrink-0 bg-slate-100"
                                             onError={(e) => {
-                                                e.target.src = `https://placehold.co/800x600/fdebe0/e05a47?text=${encodeURIComponent(recipe.title)}`;
+                                                e.target.src = generateFoodImage(recipe.title, recipe.category);
                                             }}
                                         />
                                         <div className="min-w-0">
@@ -644,12 +772,12 @@ Return ONLY a valid JSON object matching this structure:
                         </div>
                     )}
 
-                    {/* SETTINGS MODAL */}
+                    {}
                     {isSettingsOpen && (
                         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex justify-center items-center p-4">
-                            <div className="bg-white w-full max-w-md rounded-3xl shadow-2xl p-6 border border-slate-100 space-y-4">
+                            <div className="bg-white w-full max-w-md rounded-3xl shadow-2xl p-6 border border-slate-100 space-y-5">
                                 <div className="flex justify-between items-center border-b pb-3 border-slate-100">
-                                    <h2 className="text-lg font-bold text-slate-900">⚙️ Settings</h2>
+                                    <h2 className="text-lg font-bold text-slate-900">⚙️ Settings & Backup</h2>
                                     <button 
                                         onClick={() => setIsSettingsOpen(false)}
                                         className="text-slate-400 hover:text-slate-700 font-bold text-xl cursor-pointer"
@@ -660,18 +788,36 @@ Return ONLY a valid JSON object matching this structure:
 
                                 <div>
                                     <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
-                                        Optional AI Helper Key
+                                        Google Gemini API Key (Optional)
                                     </label>
                                     <p className="text-xs text-slate-500 mb-2">
-                                        Optional. Leave blank to manually enter recipe details directly alongside uploaded photos!
+                                        Optional: Unlocks AI card photo scanning. (Text extraction works standard without key).
                                     </p>
                                     <input 
                                         type="password"
                                         value={userApiKey}
                                         onChange={(e) => setUserApiKey(e.target.value)}
-                                        placeholder="Optional key..."
+                                        placeholder="AIzaSy..."
                                         className="w-full p-3 border border-slate-300 rounded-xl font-mono text-xs focus:ring-2 focus:ring-brand-500 focus:outline-none"
                                     />
+                                </div>
+
+                                <div className="pt-2 border-t border-slate-100 space-y-2">
+                                    <label className="block text-xs font-bold text-slate-700 uppercase">
+                                        Recipe Box Backup & Restore
+                                    </label>
+                                    <div className="flex gap-2">
+                                        <button
+                                            onClick={handleExportBackup}
+                                            className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1"
+                                        >
+                                            <span>📥</span> Export Backup
+                                        </button>
+                                        <label className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1 cursor-pointer">
+                                            <span>📤</span> Import Backup
+                                            <input type="file" accept=".json" onChange={handleImportBackup} className="hidden" />
+                                        </label>
+                                    </div>
                                 </div>
 
                                 <button 
@@ -681,13 +827,13 @@ Return ONLY a valid JSON object matching this structure:
                                     }}
                                     className="w-full bg-brand-500 hover:bg-brand-600 text-white font-bold py-3 rounded-2xl cursor-pointer"
                                 >
-                                    Save Settings
+                                    Done
                                 </button>
                             </div>
                         </div>
                     )}
 
-                    {/* ADD / EDIT RECIPE MODAL */}
+                    {}
                     {isAddModalOpen && (
                         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex justify-center items-center p-3 sm:p-4 overflow-y-auto">
                             <div className="bg-white w-full max-w-2xl rounded-3xl shadow-2xl overflow-hidden my-auto border border-slate-100 flex flex-col max-h-[90vh]">
@@ -697,7 +843,7 @@ Return ONLY a valid JSON object matching this structure:
                                             {editingRecipeId ? 'Edit Recipe' : 'Add New Recipe'}
                                         </h2>
                                         <p className="text-xs text-slate-500 font-medium">
-                                            {editingRecipeId ? 'Make adjustments or fix typos below' : 'Upload card photos, paste text/links, or enter manually'}
+                                            {editingRecipeId ? 'Make adjustments below' : 'Scan photos, paste link/text, or enter manually'}
                                         </p>
                                     </div>
                                     <button 
@@ -741,21 +887,20 @@ Return ONLY a valid JSON object matching this structure:
                                     {!editingRecipeId && importTab === 'photo' && (
                                         <div className="space-y-4">
                                             <p className="text-xs sm:text-sm text-slate-600 font-medium">
-                                                Snap or upload photos of your recipe card (Front and optional Back). Fully supports iPhone HEIC photo formats!
+                                                Take or upload photos of physical recipe cards (Front and optional Back). Trish's assistant will parse all ingredients and steps automatically! Supports iPhone HEIC photos.
                                             </p>
 
                                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                                {/* PHOTO 1: FRONT */}
                                                 <div className="border-2 border-dashed border-slate-300 rounded-2xl p-4 text-center hover:border-brand-500 transition-colors bg-orange-50/30 flex flex-col justify-between min-h-[200px]">
                                                     <div className="text-xs font-bold text-brand-700 bg-orange-100 py-1 px-3 rounded-full self-center mb-2">
                                                         📸 PHOTO 1: FRONT SIDE
                                                     </div>
                                                     {frontImage ? (
                                                         <div className="space-y-3">
-                                                            <img src={frontImage} alt="Front of card" className="h-36 rounded-xl mx-auto object-cover shadow-sm w-full" />
+                                                            <img src={frontImage} alt="Front of card" className="h-32 rounded-xl mx-auto object-cover shadow-sm w-full" />
                                                             <div className="flex gap-2 justify-center">
                                                                 <label className="bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold px-3 py-1.5 rounded-xl text-xs cursor-pointer">
-                                                                    Change Photo
+                                                                    Retake
                                                                     <input type="file" accept="image/*,.heic,.heif" onChange={(e) => handleImageUpload(e, setFrontImage)} className="hidden" />
                                                                 </label>
                                                                 <button type="button" onClick={() => setFrontImage(null)} className="text-red-600 font-bold text-xs px-2 py-1.5 cursor-pointer">Remove</button>
@@ -765,27 +910,26 @@ Return ONLY a valid JSON object matching this structure:
                                                         <label className="cursor-pointer block py-4 my-auto">
                                                             <div className="text-3xl mb-1">📷</div>
                                                             <span className="font-bold text-slate-800 text-sm block mb-1">
-                                                                Take or Select Front Photo
+                                                                Take Front Photo
                                                             </span>
                                                             <span className="text-xs text-slate-500 block">
-                                                                Card title & ingredients side
+                                                                Title & ingredients side
                                                             </span>
                                                             <input type="file" accept="image/*,.heic,.heif" onChange={(e) => handleImageUpload(e, setFrontImage)} className="hidden" />
                                                         </label>
                                                     )}
                                                 </div>
 
-                                                {/* PHOTO 2: BACK */}
                                                 <div className="border-2 border-dashed border-slate-300 rounded-2xl p-4 text-center hover:border-brand-500 transition-colors bg-orange-50/30 flex flex-col justify-between min-h-[200px]">
                                                     <div className="text-xs font-bold text-slate-600 bg-slate-100 py-1 px-3 rounded-full self-center mb-2">
                                                         📸 PHOTO 2: BACK SIDE (OPTIONAL)
                                                     </div>
                                                     {backImage ? (
                                                         <div className="space-y-3">
-                                                            <img src={backImage} alt="Back of card" className="h-36 rounded-xl mx-auto object-cover shadow-sm w-full" />
+                                                            <img src={backImage} alt="Back of card" className="h-32 rounded-xl mx-auto object-cover shadow-sm w-full" />
                                                             <div className="flex gap-2 justify-center">
                                                                 <label className="bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold px-3 py-1.5 rounded-xl text-xs cursor-pointer">
-                                                                    Change Photo
+                                                                    Retake
                                                                     <input type="file" accept="image/*,.heic,.heif" onChange={(e) => handleImageUpload(e, setBackImage)} className="hidden" />
                                                                 </label>
                                                                 <button type="button" onClick={() => setBackImage(null)} className="text-red-600 font-bold text-xs px-2 py-1.5 cursor-pointer">Remove</button>
@@ -795,7 +939,7 @@ Return ONLY a valid JSON object matching this structure:
                                                         <label className="cursor-pointer block py-4 my-auto">
                                                             <div className="text-3xl mb-1">🔄</div>
                                                             <span className="font-bold text-slate-800 text-sm block mb-1">
-                                                                Take or Select Back Photo
+                                                                Take Back Photo
                                                             </span>
                                                             <span className="text-xs text-slate-500 block">
                                                                 Continued steps or notes
@@ -808,14 +952,14 @@ Return ONLY a valid JSON object matching this structure:
 
                                             {(frontImage || backImage) && (
                                                 <button 
-                                                    onClick={handleContinueWithPhoto}
+                                                    onClick={handleExtractRecipe}
                                                     disabled={isProcessing}
                                                     className="w-full bg-brand-500 text-white font-bold py-4 rounded-2xl text-lg shadow-md hover:bg-brand-600 transition-all flex items-center justify-center gap-2 cursor-pointer mt-2"
                                                 >
                                                     {isProcessing ? (
-                                                        <span>⏳ {processingStatus || 'Processing...'}</span>
+                                                        <span>⏳ {processingStatus || 'Extracting Recipe...'}</span>
                                                     ) : (
-                                                        <span>📸 Use Card Photo & Fill Details →</span>
+                                                        <span>✨ Read Photos & Extract Details →</span>
                                                     )}
                                                 </button>
                                             )}
@@ -826,67 +970,34 @@ Return ONLY a valid JSON object matching this structure:
                                         <div className="space-y-4">
                                             <div>
                                                 <label className="block text-sm font-bold text-slate-700 mb-2">
-                                                    Paste Recipe Link or Copied Text
+                                                    Paste Recipe Text or Link
                                                 </label>
                                                 <textarea 
-                                                    rows={5}
+                                                    rows={6}
                                                     value={pastedLinkOrText}
                                                     onChange={(e) => setPastedLinkOrText(e.target.value)}
-                                                    placeholder="Paste web link (e.g. https://...) or paste recipe text directly here..."
+                                                    placeholder="Paste web recipe text, copied email, or ingredient list here..."
                                                     className="w-full p-4 border border-slate-300 rounded-2xl focus:ring-2 focus:ring-brand-500 focus:outline-none text-base font-medium"
                                                 />
                                             </div>
 
                                             <button 
-                                                onClick={() => {
-                                                    setFormData(prev => ({ ...prev, description: pastedLinkOrText.slice(0, 150) }));
-                                                    setImportTab('manual');
-                                                }}
-                                                className="w-full bg-brand-500 text-white font-bold py-4 rounded-2xl text-lg shadow-md hover:bg-brand-600 transition-all flex items-center justify-center gap-2 cursor-pointer"
+                                                onClick={handleExtractRecipe}
+                                                disabled={isProcessing || !pastedLinkOrText.trim()}
+                                                className="w-full bg-brand-500 text-white font-bold py-4 rounded-2xl text-lg shadow-md hover:bg-brand-600 disabled:opacity-50 transition-all flex items-center justify-center gap-2 cursor-pointer"
                                             >
-                                                <span>✏️ Continue to Review Recipe Details →</span>
+                                                {isProcessing ? (
+                                                    <span>⏳ {processingStatus || 'Processing...'}</span>
+                                                ) : (
+                                                    <span>✨ Extract Recipe Details →</span>
+                                                )}
                                             </button>
                                         </div>
                                     )}
 
+                                    {}
                                     {(editingRecipeId || importTab === 'manual') && (
                                         <form onSubmit={handleSaveRecipe} className="space-y-4">
-                                            
-                                            {/* REFERENCE CARD PREVIEW (ON-SCREEN AID FOR TRISH) */}
-                                            {(frontImage || backImage) && !editingRecipeId && (
-                                                <div className="bg-orange-50 border border-orange-200 rounded-2xl p-3 space-y-2">
-                                                    <div className="flex justify-between items-center">
-                                                        <span className="text-xs font-bold text-brand-800 flex items-center gap-1.5">
-                                                            <span>📷</span> YOUR RECIPE CARD PHOTO REFERENCE
-                                                        </span>
-                                                        <button 
-                                                            type="button"
-                                                            onClick={() => setShowReferenceCard(!showReferenceCard)}
-                                                            className="text-xs font-bold text-brand-600 underline cursor-pointer"
-                                                        >
-                                                            {showReferenceCard ? 'Hide Card' : 'Show Card'}
-                                                        </button>
-                                                    </div>
-                                                    
-                                                    {showReferenceCard && (
-                                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
-                                                            {frontImage && (
-                                                                <div className="bg-white p-1 rounded-xl border border-orange-100 shadow-sm">
-                                                                    <span className="text-[10px] font-bold text-slate-500 block mb-1 text-center">FRONT PHOTO</span>
-                                                                    <img src={frontImage} alt="Recipe Card Front" className="w-full h-40 object-contain rounded-lg max-h-48" />
-                                                                </div>
-                                                            )}
-                                                            {backImage && (
-                                                                <div className="bg-white p-1 rounded-xl border border-orange-100 shadow-sm">
-                                                                    <span className="text-[10px] font-bold text-slate-500 block mb-1 text-center">BACK PHOTO</span>
-                                                                    <img src={backImage} alt="Recipe Card Back" className="w-full h-40 object-contain rounded-lg max-h-48" />
-                                                                </div>
-                                                            )}
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            )}
-
                                             <div>
                                                 <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Recipe Title *</label>
                                                 <input 
@@ -950,19 +1061,26 @@ Return ONLY a valid JSON object matching this structure:
                                             </div>
 
                                             <div>
-                                                <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Recipe Photo</label>
+                                                <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Recipe Photo URL / Image</label>
                                                 <div className="flex gap-2 items-center">
                                                     <input 
                                                         type="text"
                                                         value={formData.imageUrl}
                                                         onChange={(e) => setFormData({...formData, imageUrl: e.target.value})}
-                                                        placeholder="Card photo attached or image link"
-                                                        className="flex-1 p-3 border border-slate-300 rounded-xl text-xs text-slate-600 truncate"
+                                                        placeholder="Image URL"
+                                                        className="flex-1 p-3 border border-slate-300 rounded-xl text-xs text-slate-600"
                                                     />
-                                                    <label className="bg-orange-100 hover:bg-orange-200 text-brand-700 text-xs font-bold px-3 py-3 rounded-xl whitespace-nowrap cursor-pointer">
-                                                        📁 Upload New Photo
-                                                        <input type="file" accept="image/*,.heic,.heif" onChange={(e) => handleImageUpload(e, (url) => setFormData({...formData, imageUrl: url}))} className="hidden" />
-                                                    </label>
+                                                    <button 
+                                                        type="button"
+                                                        onClick={() => {
+                                                            if (!formData.title) return showAlert("Please enter a recipe title first!");
+                                                            const newImg = generateFoodImage(formData.title, formData.category);
+                                                            setFormData({...formData, imageUrl: newImg});
+                                                        }}
+                                                        className="bg-orange-100 hover:bg-orange-200 text-brand-700 text-xs font-bold px-3 py-3 rounded-xl whitespace-nowrap cursor-pointer"
+                                                    >
+                                                        🖼 Auto Photo
+                                                    </button>
                                                 </div>
                                             </div>
 
@@ -1012,7 +1130,7 @@ Return ONLY a valid JSON object matching this structure:
                         </div>
                     )}
 
-                    {/* RECIPE DETAILS MODAL */}
+                    {}
                     {activeRecipe && !isKitchenMode && (
                         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-40 flex justify-center p-2 sm:p-4 overflow-y-auto">
                             <div className="bg-white w-full max-w-3xl rounded-3xl shadow-2xl overflow-hidden my-auto border border-slate-100 relative">
@@ -1044,7 +1162,7 @@ Return ONLY a valid JSON object matching this structure:
                                         alt={activeRecipe.title} 
                                         className="w-full h-full object-cover"
                                         onError={(e) => {
-                                            e.target.src = `https://placehold.co/800x600/fdebe0/e05a47?text=${encodeURIComponent(activeRecipe.title)}`;
+                                            e.target.src = generateFoodImage(activeRecipe.title, activeRecipe.category);
                                         }}
                                     />
                                     <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent"></div>
@@ -1073,7 +1191,7 @@ Return ONLY a valid JSON object matching this structure:
 
                                 <div className="p-6 sm:p-8 space-y-8">
                                     {activeRecipe.description && (
-                                        <p className="text-slate-600 italic text-base sm:text-lg leading-relaxed bg-cream p-4 rounded-2xl border border-amber-100">
+                                        <p className="text-slate-600 italic text-base sm:text-lg leading-relaxed bg-amber-50/60 p-4 rounded-2xl border border-amber-100">
                                             "{activeRecipe.description}"
                                         </p>
                                     )}
@@ -1122,7 +1240,7 @@ Return ONLY a valid JSON object matching this structure:
                                                 onClick={() => setDeleteConfirmRecipeId(activeRecipe.id)}
                                                 className="text-red-500 hover:text-red-700 hover:bg-red-50 font-bold text-sm px-3.5 py-2.5 rounded-xl transition-colors cursor-pointer"
                                             >
-                                                🗑️ Delete
+                                                🗑️️ Delete
                                             </button>
                                         </div>
                                         <button 
@@ -1137,7 +1255,7 @@ Return ONLY a valid JSON object matching this structure:
                         </div>
                     )}
 
-                    {/* KITCHEN MODE VIEW */}
+                    {}
                     {activeRecipe && isKitchenMode && (
                         <KitchenMode 
                             recipe={activeRecipe} 
@@ -1145,7 +1263,7 @@ Return ONLY a valid JSON object matching this structure:
                         />
                     )}
 
-                    {/* CUSTOM NOTICE MODAL */}
+                    {}
                     {notice && (
                         <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
                             <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl text-center space-y-4 border border-slate-100">
@@ -1162,7 +1280,7 @@ Return ONLY a valid JSON object matching this structure:
                         </div>
                     )}
 
-                    {/* CUSTOM DELETE CONFIRMATION MODAL */}
+                    {}
                     {deleteConfirmRecipeId && (
                         <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
                             <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl text-center space-y-4 border border-slate-100">
@@ -1194,6 +1312,7 @@ Return ONLY a valid JSON object matching this structure:
             const [currentStep, setCurrentStep] = useState(0);
             const [timerSeconds, setTimerSeconds] = useState(0);
             const [timerActive, setTimerActive] = useState(false);
+            const [isSpeaking, setIsSpeaking] = useState(false);
 
             useEffect(() => {
                 let interval = null;
@@ -1216,15 +1335,22 @@ Return ONLY a valid JSON object matching this structure:
             const speakCurrentStep = () => {
                 if ('speechSynthesis' in window) {
                     window.speechSynthesis.cancel();
+                    if (isSpeaking) {
+                        setIsSpeaking(false);
+                        return;
+                    }
                     const text = recipe.instructions[currentStep];
                     const utterance = new SpeechSynthesisUtterance(`Step ${currentStep + 1}: ${text}`);
                     utterance.rate = 0.9;
+                    utterance.onend = () => setIsSpeaking(false);
+                    utterance.onerror = () => setIsSpeaking(false);
+                    setIsSpeaking(true);
                     window.speechSynthesis.speak(utterance);
                 }
             };
 
             return (
-                <div className="fixed inset-0 bg-cream z-50 flex flex-col justify-between p-4 sm:p-8">
+                <div className="fixed inset-0 bg-amber-50/90 z-50 flex flex-col justify-between p-4 sm:p-8 backdrop-blur-md">
                     <div className="flex items-center justify-between border-b border-orange-200/80 pb-4">
                         <div>
                             <span className="text-xs font-bold text-brand-600 uppercase tracking-wide">Trish's Kitchen Mode</span>
@@ -1233,13 +1359,20 @@ Return ONLY a valid JSON object matching this structure:
                         <div className="flex items-center gap-3">
                             <button 
                                 onClick={speakCurrentStep}
-                                className="bg-amber-100 text-amber-800 font-bold px-4 py-2.5 rounded-full text-base flex items-center gap-2 border border-amber-200 cursor-pointer"
+                                className={`font-bold px-4 py-2.5 rounded-full text-sm sm:text-base flex items-center gap-2 border transition-all cursor-pointer ${
+                                    isSpeaking 
+                                        ? 'bg-amber-500 text-white border-amber-600 shadow-md' 
+                                        : 'bg-amber-100 text-amber-800 border-amber-200 hover:bg-amber-200'
+                                }`}
                             >
-                                🔊 Read Aloud
+                                <span>{isSpeaking ? '🔊 Pause Voice' : '🔊 Read Step'}</span>
                             </button>
                             <button 
-                                onClick={onClose}
-                                className="bg-slate-900 text-white font-bold px-5 py-2.5 rounded-full text-base cursor-pointer"
+                                onClick={() => {
+                                    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+                                    onClose();
+                                }}
+                                className="bg-slate-900 text-white font-bold px-5 py-2.5 rounded-full text-base cursor-pointer hover:bg-slate-800"
                             >
                                 Exit Mode ✕
                             </button>
@@ -1249,7 +1382,7 @@ Return ONLY a valid JSON object matching this structure:
                     <div className="my-auto max-w-3xl mx-auto w-full bg-white p-6 sm:p-10 rounded-3xl border-2 border-orange-200 shadow-xl space-y-6">
                         <div className="flex justify-between items-center text-slate-500 font-bold text-sm sm:text-base">
                             <span>STEP {currentStep + 1} OF {recipe.instructions.length}</span>
-                            <span>⏱️ {recipe.cookTime}</span>
+                            <span>⏱️ Cook Time: {recipe.cookTime}</span>
                         </div>
 
                         <p className="text-2xl sm:text-4xl font-semibold text-slate-900 leading-relaxed sm:leading-loose">
@@ -1269,13 +1402,13 @@ Return ONLY a valid JSON object matching this structure:
                             <div className="flex gap-2">
                                 <button 
                                     onClick={() => { setTimerSeconds(s => s + 300); setTimerActive(true); }}
-                                    className="bg-white border border-slate-300 font-bold px-3 py-2 rounded-xl text-xs sm:text-sm cursor-pointer"
+                                    className="bg-white border border-slate-300 font-bold px-3 py-2 rounded-xl text-xs sm:text-sm cursor-pointer hover:bg-slate-50"
                                 >
                                     +5 Mins
                                 </button>
                                 <button 
                                     onClick={() => setTimerActive(!timerActive)}
-                                    className={`font-bold px-4 py-2 rounded-xl text-xs sm:text-sm text-white cursor-pointer ${timerActive ? 'bg-amber-600' : 'bg-brand-500'}`}
+                                    className={`font-bold px-4 py-2 rounded-xl text-xs sm:text-sm text-white cursor-pointer ${timerActive ? 'bg-amber-600' : 'bg-brand-500 hover:bg-brand-600'}`}
                                 >
                                     {timerActive ? 'Pause' : 'Start'}
                                 </button>
@@ -1286,16 +1419,24 @@ Return ONLY a valid JSON object matching this structure:
                     <div className="flex justify-between items-center max-w-3xl mx-auto w-full gap-4 pt-4">
                         <button 
                             disabled={currentStep === 0}
-                            onClick={() => setCurrentStep(c => c - 1)}
-                            className="flex-1 bg-white border border-slate-300 disabled:opacity-30 text-slate-800 font-bold py-5 rounded-2xl text-xl shadow-sm text-center cursor-pointer"
+                            onClick={() => {
+                                if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+                                setIsSpeaking(false);
+                                setCurrentStep(c => c - 1);
+                            }}
+                            className="flex-1 bg-white border border-slate-300 disabled:opacity-30 text-slate-800 font-bold py-5 rounded-2xl text-xl shadow-sm text-center cursor-pointer hover:bg-slate-50"
                         >
                             ← Previous Step
                         </button>
                         
                         <button 
                             disabled={currentStep === recipe.instructions.length - 1}
-                            onClick={() => setCurrentStep(c => c + 1)}
-                            className="flex-1 bg-brand-500 disabled:opacity-30 text-white font-bold py-5 rounded-2xl text-xl shadow-md text-center cursor-pointer"
+                            onClick={() => {
+                                if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+                                setIsSpeaking(false);
+                                setCurrentStep(c => c + 1);
+                            }}
+                            className="flex-1 bg-brand-500 disabled:opacity-30 text-white font-bold py-5 rounded-2xl text-xl shadow-md text-center cursor-pointer hover:bg-brand-600"
                         >
                             Next Step →
                         </button>
