@@ -143,6 +143,10 @@
                 return saved ? JSON.parse(saved) : INITIAL_RECIPES;
             });
 
+            const [userApiKey, setUserApiKey] = useState(() => {
+                return localStorage.getItem('trish_gemini_api_key') || '';
+            });
+
             const [selectedCategory, setSelectedCategory] = useState("All");
             const [searchQuery, setSearchQuery] = useState("");
             const [viewMode, setViewMode] = useState('grid');
@@ -151,10 +155,12 @@
             
             // Modal States
             const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+            const [editingRecipeId, setEditingRecipeId] = useState(null);
+            const [isSettingsOpen, setIsSettingsOpen] = useState(false);
             const [importTab, setImportTab] = useState('photo');
             
             // Custom Alert / Notification Modal State
-            const [notice, setNotice] = useState(null); // { message, type }
+            const [notice, setNotice] = useState(null); // { message, title }
             const [deleteConfirmRecipeId, setDeleteConfirmRecipeId] = useState(null);
 
             // AI Extraction State
@@ -180,13 +186,20 @@
                 localStorage.setItem('trish_recipes', JSON.stringify(recipes));
             }, [recipes]);
 
-            const showAlert = (message) => {
-                setNotice({ message });
+            useEffect(() => {
+                localStorage.setItem('trish_gemini_api_key', userApiKey);
+            }, [userApiKey]);
+
+            const showAlert = (message, title = "Notice") => {
+                setNotice({ message, title });
             };
 
             const callGeminiVisionOrText = async (prompt, base64Images = []) => {
-                const apiKey = ""; // Provided automatically by environment runtime
-                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+                if (!userApiKey.trim()) {
+                    throw new Error("NO_API_KEY");
+                }
+
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${userApiKey.trim()}`;
 
                 const parts = [{ text: prompt }];
                 const imagesArray = Array.isArray(base64Images) ? base64Images : [base64Images].filter(Boolean);
@@ -228,17 +241,18 @@ Return ONLY a valid JSON object matching this structure:
                     body: JSON.stringify(payload)
                 });
 
-                if (!res.ok) throw new Error("Failed to process recipe with AI");
+                if (!res.ok) throw new Error("API_ERROR");
                 const result = await res.json();
                 const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
                 return JSON.parse(jsonText);
             };
 
             const generateAiImage = async (title, category) => {
+                if (!userApiKey.trim()) return `https://placehold.co/800x600/fdebe0/e05a47?text=${encodeURIComponent(title)}`;
+                
                 setProcessingStatus('🎨 Creating an appetizing photo with AI...');
                 try {
-                    const apiKey = "";
-                    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-image:generateContent?key=${apiKey}`;
+                    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-image:generateContent?key=${userApiKey.trim()}`;
                     
                     const prompt = `A mouth-watering, delicious gourmet food photography shot of ${title} (${category}), warm soft kitchen lighting, cozy rustic plating, culinary magazine style`;
                     
@@ -277,6 +291,15 @@ Return ONLY a valid JSON object matching this structure:
             };
 
             const handleExtractRecipe = async () => {
+                if (!userApiKey.trim()) {
+                    showAlert(
+                        "AI Scanning requires a Google Gemini API Key. Tap the ⚙️ Settings button at top right to enter a key, or click 'Review & Save' to fill in the recipe manually!",
+                        "API Key Required"
+                    );
+                    setImportTab('manual');
+                    return;
+                }
+
                 setIsProcessing(true);
                 setProcessingStatus('🔍 Reading recipe details...');
 
@@ -317,12 +340,33 @@ Return ONLY a valid JSON object matching this structure:
                         setImportTab('manual');
                     }
                 } catch (err) {
-                    showAlert("Could not automatically parse that recipe structure. You can fill out or adjust the fields manually!");
+                    if (err.message === "NO_API_KEY") {
+                        showAlert("Please tap the ⚙ Settings icon at the top right to save your free Google Gemini API Key first!", "Key Required");
+                    } else {
+                        showAlert("Could not automatically parse that recipe structure. You can fill out or adjust the fields manually on the Review & Save tab!");
+                    }
                     setImportTab('manual');
                 } finally {
                     setIsProcessing(false);
                     setProcessingStatus('');
                 }
+            };
+
+            const handleEditRecipe = (recipe) => {
+                setEditingRecipeId(recipe.id);
+                setFormData({
+                    title: recipe.title || '',
+                    category: recipe.category || 'Main Dishes',
+                    prepTime: recipe.prepTime || '',
+                    cookTime: recipe.cookTime || '',
+                    servings: recipe.servings || '',
+                    imageUrl: recipe.imageUrl || '',
+                    description: recipe.description || '',
+                    ingredientsText: Array.isArray(recipe.ingredients) ? recipe.ingredients.join('\n') : '',
+                    instructionsText: Array.isArray(recipe.instructions) ? recipe.instructions.join('\n') : ''
+                });
+                setImportTab('manual');
+                setIsAddModalOpen(true);
             };
 
             const handleSaveRecipe = (e) => {
@@ -332,8 +376,8 @@ Return ONLY a valid JSON object matching this structure:
                     return;
                 }
 
-                const newRecipe = {
-                    id: 'recipe-' + Date.now(),
+                const recipeData = {
+                    id: editingRecipeId || ('recipe-' + Date.now()),
                     title: formData.title,
                     category: formData.category,
                     prepTime: formData.prepTime || '15 mins',
@@ -345,13 +389,22 @@ Return ONLY a valid JSON object matching this structure:
                     instructions: formData.instructionsText.split('\n').filter(line => line.trim().length > 0)
                 };
 
-                setRecipes([newRecipe, ...recipes]);
+                if (editingRecipeId) {
+                    setRecipes(recipes.map(r => r.id === editingRecipeId ? recipeData : r));
+                    if (activeRecipe && activeRecipe.id === editingRecipeId) {
+                        setActiveRecipe(recipeData);
+                    }
+                } else {
+                    setRecipes([recipeData, ...recipes]);
+                    setActiveRecipe(recipeData);
+                }
+
                 setIsAddModalOpen(false);
                 resetForm();
-                setActiveRecipe(newRecipe);
             };
 
             const resetForm = () => {
+                setEditingRecipeId(null);
                 setFormData({
                     title: '',
                     category: 'Main Dishes',
@@ -399,14 +452,23 @@ Return ONLY a valid JSON object matching this structure:
                             </div>
                         </div>
 
-                        <button 
-                            onClick={() => { resetForm(); setIsAddModalOpen(true); }}
-                            className="bg-brand-500 hover:bg-brand-600 active:scale-95 transition-all text-white font-bold px-4 sm:px-6 py-3 rounded-2xl flex items-center gap-2 shadow-lg shadow-brand-500/25 text-sm sm:text-base cursor-pointer"
-                        >
-                            <span className="text-xl font-bold">+</span>
-                            <span className="hidden sm:inline">Add Recipe</span>
-                            <span className="sm:hidden">Add</span>
-                        </button>
+                        <div className="flex items-center gap-2">
+                            <button
+                                onClick={() => setIsSettingsOpen(true)}
+                                className="p-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-2xl font-bold transition-all cursor-pointer text-lg"
+                                title="Settings & API Key"
+                            >
+                                ⚙️
+                            </button>
+                            <button 
+                                onClick={() => { resetForm(); setIsAddModalOpen(true); }}
+                                className="bg-brand-500 hover:bg-brand-600 active:scale-95 transition-all text-white font-bold px-4 sm:px-6 py-3 rounded-2xl flex items-center gap-2 shadow-lg shadow-brand-500/25 text-sm sm:text-base cursor-pointer"
+                            >
+                                <span className="text-xl font-bold">+</span>
+                                <span className="hidden sm:inline">Add Recipe</span>
+                                <span className="sm:hidden">Add</span>
+                            </button>
+                        </div>
                     </header>
 
                     {/* SEARCH & CATEGORY FILTERS */}
@@ -586,51 +648,101 @@ Return ONLY a valid JSON object matching this structure:
                         </div>
                     )}
 
+                    {/* SETTINGS MODAL */}
+                    {isSettingsOpen && (
+                        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex justify-center items-center p-4">
+                            <div className="bg-white w-full max-w-md rounded-3xl shadow-2xl p-6 border border-slate-100 space-y-4">
+                                <div className="flex justify-between items-center border-b pb-3 border-slate-100">
+                                    <h2 className="text-lg font-bold text-slate-900">⚙️ Settings</h2>
+                                    <button 
+                                        onClick={() => setIsSettingsOpen(false)}
+                                        className="text-slate-400 hover:text-slate-700 font-bold text-xl cursor-pointer"
+                                    >
+                                        ✕
+                                    </button>
+                                </div>
+
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
+                                        Google Gemini API Key (Optional)
+                                    </label>
+                                    <p className="text-xs text-slate-500 mb-2">
+                                        Required only for automatic AI scanning of photos/links.
+                                    </p>
+                                    <input 
+                                        type="password"
+                                        value={userApiKey}
+                                        onChange={(e) => setUserApiKey(e.target.value)}
+                                        placeholder="AIzaSy..."
+                                        className="w-full p-3 border border-slate-300 rounded-xl font-mono text-xs focus:ring-2 focus:ring-brand-500 focus:outline-none"
+                                    />
+                                </div>
+
+                                <button 
+                                    onClick={() => {
+                                        setIsSettingsOpen(false);
+                                        showAlert("Settings saved successfully!", "Saved");
+                                    }}
+                                    className="w-full bg-brand-500 hover:bg-brand-600 text-white font-bold py-3 rounded-2xl cursor-pointer"
+                                >
+                                    Save Settings
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* ADD / EDIT RECIPE MODAL */}
                     {isAddModalOpen && (
                         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex justify-center items-center p-3 sm:p-4 overflow-y-auto">
                             <div className="bg-white w-full max-w-2xl rounded-3xl shadow-2xl overflow-hidden my-auto border border-slate-100 flex flex-col max-h-[90vh]">
                                 <div className="p-4 sm:p-6 bg-orange-50/50 border-b border-orange-100 flex items-center justify-between shrink-0">
                                     <div>
-                                        <h2 className="text-lg sm:text-xl font-bold text-slate-900">Add New Recipe</h2>
-                                        <p className="text-xs text-slate-500 font-medium">Scan photos, paste link/text, or enter manually</p>
+                                        <h2 className="text-lg sm:text-xl font-bold text-slate-900">
+                                            {editingRecipeId ? 'Edit Recipe' : 'Add New Recipe'}
+                                        </h2>
+                                        <p className="text-xs text-slate-500 font-medium">
+                                            {editingRecipeId ? 'Make adjustments or fix typos below' : 'Scan photos, paste link/text, or enter manually'}
+                                        </p>
                                     </div>
                                     <button 
-                                        onClick={() => setIsAddModalOpen(false)}
+                                        onClick={() => { resetForm(); setIsAddModalOpen(false); }}
                                         className="w-9 h-9 bg-white border border-slate-200 text-slate-500 hover:text-slate-800 rounded-full font-bold flex items-center justify-center text-lg cursor-pointer"
                                     >
                                         ✕
                                     </button>
                                 </div>
 
-                                <div className="flex border-b border-slate-100 p-2 gap-1 bg-slate-50/80 shrink-0">
-                                    <button 
-                                        onClick={() => setImportTab('photo')}
-                                        className={`flex-1 py-2.5 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                                            importTab === 'photo' ? 'bg-white text-brand-600 shadow-sm border border-slate-200/60' : 'text-slate-500 hover:text-slate-800'
-                                        }`}
-                                    >
-                                        <span>📸</span> Card Photos
-                                    </button>
-                                    <button 
-                                        onClick={() => setImportTab('link')}
-                                        className={`flex-1 py-2.5 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                                            importTab === 'link' ? 'bg-white text-brand-600 shadow-sm border border-slate-200/60' : 'text-slate-500 hover:text-slate-800'
-                                        }`}
-                                    >
-                                        <span>🌐</span> Link / Text
-                                    </button>
-                                    <button 
-                                        onClick={() => setImportTab('manual')}
-                                        className={`flex-1 py-2.5 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                                            importTab === 'manual' ? 'bg-white text-brand-600 shadow-sm border border-slate-200/60' : 'text-slate-500 hover:text-slate-800'
-                                        }`}
-                                    >
-                                        <span>✏️</span> Review & Save
-                                    </button>
-                                </div>
+                                {!editingRecipeId && (
+                                    <div className="flex border-b border-slate-100 p-2 gap-1 bg-slate-50/80 shrink-0">
+                                        <button 
+                                            onClick={() => setImportTab('photo')}
+                                            className={`flex-1 py-2.5 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                                                importTab === 'photo' ? 'bg-white text-brand-600 shadow-sm border border-slate-200/60' : 'text-slate-500 hover:text-slate-800'
+                                            }`}
+                                        >
+                                            <span>📸</span> Card Photos
+                                        </button>
+                                        <button 
+                                            onClick={() => setImportTab('link')}
+                                            className={`flex-1 py-2.5 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                                                importTab === 'link' ? 'bg-white text-brand-600 shadow-sm border border-slate-200/60' : 'text-slate-500 hover:text-slate-800'
+                                            }`}
+                                        >
+                                            <span>🌐</span> Link / Text
+                                        </button>
+                                        <button 
+                                            onClick={() => setImportTab('manual')}
+                                            className={`flex-1 py-2.5 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                                                importTab === 'manual' ? 'bg-white text-brand-600 shadow-sm border border-slate-200/60' : 'text-slate-500 hover:text-slate-800'
+                                            }`}
+                                        >
+                                            <span>✏️</span> Review & Save
+                                        </button>
+                                    </div>
+                                )}
 
                                 <div className="p-4 sm:p-6 overflow-y-auto space-y-4">
-                                    {importTab === 'photo' && (
+                                    {!editingRecipeId && importTab === 'photo' && (
                                         <div className="space-y-4">
                                             <p className="text-xs sm:text-sm text-slate-600 font-medium">
                                                 Take or upload photos of your physical recipe card (Front and optional Back). Trish's AI assistant will extract all ingredients and steps automatically!
@@ -714,7 +826,7 @@ Return ONLY a valid JSON object matching this structure:
                                         </div>
                                     )}
 
-                                    {importTab === 'link' && (
+                                    {!editingRecipeId && importTab === 'link' && (
                                         <div className="space-y-4">
                                             <div>
                                                 <label className="block text-sm font-bold text-slate-700 mb-2">
@@ -743,7 +855,7 @@ Return ONLY a valid JSON object matching this structure:
                                         </div>
                                     )}
 
-                                    {importTab === 'manual' && (
+                                    {(editingRecipeId || importTab === 'manual') && (
                                         <form onSubmit={handleSaveRecipe} className="space-y-4">
                                             <div>
                                                 <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Recipe Title *</label>
@@ -832,6 +944,17 @@ Return ONLY a valid JSON object matching this structure:
                                             </div>
 
                                             <div>
+                                                <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Description (Optional)</label>
+                                                <input 
+                                                    type="text"
+                                                    value={formData.description}
+                                                    onChange={(e) => setFormData({...formData, description: e.target.value})}
+                                                    placeholder="Short note or description about the dish..."
+                                                    className="w-full p-3 border border-slate-300 rounded-xl font-medium text-slate-800 text-sm"
+                                                />
+                                            </div>
+
+                                            <div>
                                                 <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Ingredients (one per line)</label>
                                                 <textarea 
                                                     rows={5}
@@ -857,7 +980,7 @@ Return ONLY a valid JSON object matching this structure:
                                                 type="submit"
                                                 className="w-full bg-brand-500 hover:bg-brand-600 text-white font-bold py-4 rounded-2xl text-lg shadow-md transition-all mt-4 cursor-pointer"
                                             >
-                                                💾 Save Recipe to Trish's Box
+                                                {editingRecipeId ? '💾 Save Changes' : '💾 Save Recipe to Trish\'s Box'}
                                             </button>
                                         </form>
                                     )}
@@ -866,6 +989,7 @@ Return ONLY a valid JSON object matching this structure:
                         </div>
                     )}
 
+                    {/* VIEW RECIPE MODAL */}
                     {activeRecipe && !isKitchenMode && (
                         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-40 flex justify-center p-2 sm:p-4 overflow-y-auto">
                             <div className="bg-white w-full max-w-3xl rounded-3xl shadow-2xl overflow-hidden my-auto border border-slate-100 relative">
@@ -956,16 +1080,24 @@ Return ONLY a valid JSON object matching this structure:
                                         </ol>
                                     </div>
 
-                                    <div className="pt-4 border-t border-slate-200 flex justify-between items-center">
-                                        <button 
-                                            onClick={() => setDeleteConfirmRecipeId(activeRecipe.id)}
-                                            className="text-red-500 hover:text-red-700 font-bold text-sm px-3 py-2 cursor-pointer"
-                                        >
-                                            🗑️ Delete Recipe
-                                        </button>
+                                    <div className="pt-4 border-t border-slate-200 flex justify-between items-center flex-wrap gap-3">
+                                        <div className="flex items-center gap-2">
+                                            <button 
+                                                onClick={() => handleEditRecipe(activeRecipe)}
+                                                className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-sm px-4 py-2.5 rounded-xl transition-colors cursor-pointer flex items-center gap-1.5"
+                                            >
+                                                ✏️ Edit Recipe
+                                            </button>
+                                            <button 
+                                                onClick={() => setDeleteConfirmRecipeId(activeRecipe.id)}
+                                                className="text-red-500 hover:text-red-700 hover:bg-red-50 font-bold text-sm px-3.5 py-2.5 rounded-xl transition-colors cursor-pointer"
+                                            >
+                                                🗑️ Delete
+                                            </button>
+                                        </div>
                                         <button 
                                             onClick={() => setIsKitchenMode(true)}
-                                            className="bg-brand-500 text-white font-bold px-6 py-3 rounded-2xl text-base shadow-md cursor-pointer"
+                                            className="bg-brand-500 hover:bg-brand-600 text-white font-bold px-6 py-3 rounded-2xl text-base shadow-md cursor-pointer"
                                         >
                                             Start Cooking Mode 👩‍🍳
                                         </button>
@@ -987,7 +1119,8 @@ Return ONLY a valid JSON object matching this structure:
                         <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
                             <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl text-center space-y-4 border border-slate-100">
                                 <div className="text-4xl">ℹ️</div>
-                                <p className="text-slate-800 font-semibold text-base">{notice.message}</p>
+                                <h3 className="font-bold text-slate-900 text-lg">{notice.title || "Notice"}</h3>
+                                <p className="text-slate-600 text-sm">{notice.message}</p>
                                 <button 
                                     onClick={() => setNotice(null)}
                                     className="bg-brand-500 text-white font-bold px-6 py-2.5 rounded-2xl w-full cursor-pointer"
@@ -1002,7 +1135,7 @@ Return ONLY a valid JSON object matching this structure:
                     {deleteConfirmRecipeId && (
                         <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
                             <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl text-center space-y-4 border border-slate-100">
-                                <div className="text-4xl">🗑️</div>
+                                <div className="text-4xl">🗑</div>
                                 <h3 className="font-bold text-slate-900 text-lg">Delete Recipe?</h3>
                                 <p className="text-slate-600 text-sm">Are you sure you want to remove this recipe from Trish's collection?</p>
                                 <div className="flex gap-3">
