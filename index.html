@@ -161,12 +161,13 @@
             const [editingRecipeId, setEditingRecipeId] = useState(null);
             const [isSettingsOpen, setIsSettingsOpen] = useState(false);
             const [importTab, setImportTab] = useState('photo');
+            const [showReferenceCard, setShowReferenceCard] = useState(true);
             
             // Custom Alert / Notification Modal State
             const [notice, setNotice] = useState(null);
             const [deleteConfirmRecipeId, setDeleteConfirmRecipeId] = useState(null);
 
-            // AI Extraction State
+            // Processing State
             const [isProcessing, setIsProcessing] = useState(false);
             const [processingStatus, setProcessingStatus] = useState('');
             const [pastedLinkOrText, setPastedLinkOrText] = useState('');
@@ -198,9 +199,7 @@
             };
 
             const callGeminiVisionOrText = async (prompt, base64Images = []) => {
-                if (!userApiKey.trim()) {
-                    throw new Error("NO_API_KEY");
-                }
+                if (!userApiKey.trim()) return null;
 
                 const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${userApiKey.trim()}`;
 
@@ -253,53 +252,22 @@ Return ONLY a valid JSON object matching this structure:
                 return JSON.parse(jsonText);
             };
 
-            const generateAiImage = async (title, category) => {
-                if (!userApiKey.trim()) return `https://placehold.co/800x600/fdebe0/e05a47?text=${encodeURIComponent(title)}`;
-                
-                setProcessingStatus('🎨 Creating an appetizing photo with AI...');
-                try {
-                    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-image:generateContent?key=${userApiKey.trim()}`;
-                    
-                    const prompt = `A mouth-watering, delicious gourmet food photography shot of ${title} (${category}), warm soft kitchen lighting, cozy rustic plating, culinary magazine style`;
-                    
-                    const payload = {
-                        contents: [{ parts: [{ text: prompt }] }],
-                        generationConfig: {
-                            responseModalities: ['TEXT', 'IMAGE']
-                        }
-                    };
-
-                    const response = await fetch(apiUrl, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(payload)
-                    });
-
-                    const result = await response.json();
-                    const base64Data = result?.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
-                    
-                    if (base64Data) {
-                        return `data:image/png;base64,${base64Data}`;
-                    }
-                } catch (err) {
-                    console.error("AI Image Generation error:", err);
-                }
-                return `https://placehold.co/800x600/fdebe0/e05a47?text=${encodeURIComponent(title)}`;
-            };
-
             const handleImageUpload = async (e, setImageSetter) => {
-                const file = e.target.files[0];
+                const file = e.target.files && e.target.files[0];
                 if (!file) return;
 
                 let fileToRead = file;
+                const fileName = (file.name || '').toLowerCase();
+                const fileType = (file.type || '').toLowerCase();
 
                 // Check for iPhone / iPad HEIC or HEIF files
-                const isHeic = file.type.includes('heic') || file.type.includes('heif') || 
-                               file.name.toLowerCase().endsWith('.heic') || file.name.toLowerCase().endsWith('.heif');
+                const isHeic = fileType.includes('heic') || fileType.includes('heif') || 
+                               fileName.endsWith('.heic') || fileName.endsWith('.heif');
 
                 if (isHeic) {
+                    setIsProcessing(true);
+                    setProcessingStatus('📱 Processing iPhone HEIC photo...');
                     try {
-                        setProcessingStatus('📱 Converting iPhone HEIC photo...');
                         if (window.heic2any) {
                             const convertedBlob = await window.heic2any({
                                 blob: file,
@@ -310,74 +278,72 @@ Return ONLY a valid JSON object matching this structure:
                         }
                     } catch (conversionErr) {
                         console.warn("HEIC Conversion note:", conversionErr);
+                    } finally {
+                        setIsProcessing(false);
+                        setProcessingStatus('');
                     }
                 }
 
                 const reader = new FileReader();
-                reader.onloadend = () => setImageSetter(reader.result);
+                reader.onloadend = () => {
+                    const resultUrl = reader.result;
+                    setImageSetter(resultUrl);
+                    // Automatically attach photo as the recipe image
+                    setFormData(prev => ({
+                        ...prev,
+                        imageUrl: prev.imageUrl || resultUrl
+                    }));
+                };
                 reader.readAsDataURL(fileToRead);
             };
 
-            const handleExtractRecipe = async () => {
-                if (!userApiKey.trim()) {
-                    showAlert(
-                        "AI Scanning requires a Google Gemini API Key. Tap the ⚙️ Settings button at top right to enter a key, or click 'Review & Save' to fill in the recipe manually!",
-                        "API Key Optional"
-                    );
-                    setImportTab('manual');
+            const handleContinueWithPhoto = async () => {
+                const cardPhoto = frontImage || backImage;
+                if (!cardPhoto) {
+                    showAlert("Please select or take a photo of your recipe card first!");
                     return;
                 }
 
-                setIsProcessing(true);
-                setProcessingStatus('🔍 Reading recipe details...');
+                // Attach card photo as the main recipe image if none is set
+                setFormData(prev => ({
+                    ...prev,
+                    imageUrl: prev.imageUrl || cardPhoto
+                }));
 
-                try {
-                    let extracted = null;
-                    if (importTab === 'photo' && (frontImage || backImage)) {
-                        setProcessingStatus('📸 Analyzing recipe photos...');
+                // If user has an API Key set in settings, attempt background AI extraction
+                if (userApiKey.trim()) {
+                    setIsProcessing(true);
+                    setProcessingStatus('🔍 Auto-filling details with AI...');
+                    try {
                         const photosToAnalyze = [frontImage, backImage].filter(Boolean);
-                        extracted = await callGeminiVisionOrText(
-                            "Extract all recipe details from these photos of a recipe card, screenshot, or page. Combine all ingredients and steps from both images into one complete recipe.",
+                        const extracted = await callGeminiVisionOrText(
+                            "Extract all recipe details from these photos of a recipe card. Combine all ingredients and steps.",
                             photosToAnalyze
                         );
-                    } else if (importTab === 'link' && pastedLinkOrText) {
-                        setProcessingStatus('🌐 Parsing recipe from link or text...');
-                        extracted = await callGeminiVisionOrText(
-                            `Extract all recipe details from the following content:\n\n${pastedLinkOrText}`
-                        );
-                    }
 
-                    if (extracted) {
-                        let img = frontImage || backImage || extracted.imageUrl || '';
-                        if (!img) {
-                            setProcessingStatus('✨ Generating photo for Trish...');
-                            img = await generateAiImage(extracted.title || 'Delicious Recipe', extracted.category || 'Main Dishes');
+                        if (extracted) {
+                            setFormData(prev => ({
+                                title: extracted.title || prev.title,
+                                category: CATEGORIES.includes(extracted.category) ? extracted.category : prev.category,
+                                prepTime: extracted.prepTime || prev.prepTime,
+                                cookTime: extracted.cookTime || prev.cookTime,
+                                servings: extracted.servings || prev.servings,
+                                imageUrl: cardPhoto || extracted.imageUrl || prev.imageUrl,
+                                description: extracted.description || prev.description,
+                                ingredientsText: Array.isArray(extracted.ingredients) ? extracted.ingredients.join('\n') : prev.ingredientsText,
+                                instructionsText: Array.isArray(extracted.instructions) ? extracted.instructions.join('\n') : prev.instructionsText
+                            }));
                         }
-
-                        setFormData({
-                            title: extracted.title || '',
-                            category: CATEGORIES.includes(extracted.category) ? extracted.category : 'Main Dishes',
-                            prepTime: extracted.prepTime || '15 mins',
-                            cookTime: extracted.cookTime || '25 mins',
-                            servings: extracted.servings || '4 servings',
-                            imageUrl: img,
-                            description: extracted.description || '',
-                            ingredientsText: Array.isArray(extracted.ingredients) ? extracted.ingredients.join('\n') : '',
-                            instructionsText: Array.isArray(extracted.instructions) ? extracted.instructions.join('\n') : ''
-                        });
-                        setImportTab('manual');
+                    } catch (err) {
+                        console.log("Optional AI auto-fill skipped.");
+                    } finally {
+                        setIsProcessing(false);
+                        setProcessingStatus('');
                     }
-                } catch (err) {
-                    if (err.message === "NO_API_KEY") {
-                        showAlert("Please tap the ⚙ Settings icon at the top right to save your free Google Gemini API Key first!", "Key Required");
-                    } else {
-                        showAlert("Could not automatically parse that recipe structure. You can fill out or adjust the fields manually on the Review & Save tab!");
-                    }
-                    setImportTab('manual');
-                } finally {
-                    setIsProcessing(false);
-                    setProcessingStatus('');
                 }
+
+                // Smoothly navigate directly to Review & Save with card photo displayed at top
+                setImportTab('manual');
             };
 
             const handleEditRecipe = (recipe) => {
@@ -400,10 +366,11 @@ Return ONLY a valid JSON object matching this structure:
             const handleSaveRecipe = (e) => {
                 e.preventDefault();
                 if (!formData.title.trim()) {
-                    showAlert("Please provide a recipe title.");
+                    showAlert("Please enter a recipe title.");
                     return;
                 }
 
+                const cardPhoto = frontImage || backImage;
                 const recipeData = {
                     id: editingRecipeId || ('recipe-' + Date.now()),
                     title: formData.title,
@@ -411,7 +378,7 @@ Return ONLY a valid JSON object matching this structure:
                     prepTime: formData.prepTime || '15 mins',
                     cookTime: formData.cookTime || '20 mins',
                     servings: formData.servings || '4 servings',
-                    imageUrl: formData.imageUrl || `https://placehold.co/800x600/fdebe0/e05a47?text=${encodeURIComponent(formData.title)}`,
+                    imageUrl: formData.imageUrl || cardPhoto || `https://placehold.co/800x600/fdebe0/e05a47?text=${encodeURIComponent(formData.title)}`,
                     description: formData.description,
                     ingredients: formData.ingredientsText.split('\n').filter(line => line.trim().length > 0),
                     instructions: formData.instructionsText.split('\n').filter(line => line.trim().length > 0)
@@ -484,7 +451,7 @@ Return ONLY a valid JSON object matching this structure:
                             <button
                                 onClick={() => setIsSettingsOpen(true)}
                                 className="p-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-2xl font-bold transition-all cursor-pointer text-lg"
-                                title="Settings & API Key"
+                                title="Settings"
                             >
                                 ⚙️
                             </button>
@@ -519,7 +486,6 @@ Return ONLY a valid JSON object matching this structure:
                             )}
                         </div>
 
-                        {}
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                             <div className="flex gap-2 overflow-x-auto no-scrollbar py-1 flex-1">
                                 {CATEGORIES.map(cat => (
@@ -569,7 +535,7 @@ Return ONLY a valid JSON object matching this structure:
                         </div>
                     </div>
 
-                    {}
+                    {/* RECIPE LIST DISPLAY */}
                     {filteredRecipes.length === 0 ? (
                         <div className="bg-white rounded-3xl p-10 text-center border border-dashed border-slate-300">
                             <div className="text-5xl mb-3">📖</div>
@@ -678,7 +644,7 @@ Return ONLY a valid JSON object matching this structure:
                         </div>
                     )}
 
-                    {}
+                    {/* SETTINGS MODAL */}
                     {isSettingsOpen && (
                         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex justify-center items-center p-4">
                             <div className="bg-white w-full max-w-md rounded-3xl shadow-2xl p-6 border border-slate-100 space-y-4">
@@ -694,16 +660,16 @@ Return ONLY a valid JSON object matching this structure:
 
                                 <div>
                                     <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
-                                        Google Gemini API Key (Optional)
+                                        Optional AI Helper Key
                                     </label>
                                     <p className="text-xs text-slate-500 mb-2">
-                                        Required only for automatic AI scanning of photos/links.
+                                        Optional. Leave blank to manually enter recipe details directly alongside uploaded photos!
                                     </p>
                                     <input 
                                         type="password"
                                         value={userApiKey}
                                         onChange={(e) => setUserApiKey(e.target.value)}
-                                        placeholder="AIzaSy..."
+                                        placeholder="Optional key..."
                                         className="w-full p-3 border border-slate-300 rounded-xl font-mono text-xs focus:ring-2 focus:ring-brand-500 focus:outline-none"
                                     />
                                 </div>
@@ -721,7 +687,7 @@ Return ONLY a valid JSON object matching this structure:
                         </div>
                     )}
 
-                    {}
+                    {/* ADD / EDIT RECIPE MODAL */}
                     {isAddModalOpen && (
                         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex justify-center items-center p-3 sm:p-4 overflow-y-auto">
                             <div className="bg-white w-full max-w-2xl rounded-3xl shadow-2xl overflow-hidden my-auto border border-slate-100 flex flex-col max-h-[90vh]">
@@ -731,7 +697,7 @@ Return ONLY a valid JSON object matching this structure:
                                             {editingRecipeId ? 'Edit Recipe' : 'Add New Recipe'}
                                         </h2>
                                         <p className="text-xs text-slate-500 font-medium">
-                                            {editingRecipeId ? 'Make adjustments or fix typos below' : 'Scan photos, paste link/text, or enter manually'}
+                                            {editingRecipeId ? 'Make adjustments or fix typos below' : 'Upload card photos, paste text/links, or enter manually'}
                                         </p>
                                     </div>
                                     <button 
@@ -775,7 +741,7 @@ Return ONLY a valid JSON object matching this structure:
                                     {!editingRecipeId && importTab === 'photo' && (
                                         <div className="space-y-4">
                                             <p className="text-xs sm:text-sm text-slate-600 font-medium">
-                                                Take or upload photos of your physical recipe card (Front and optional Back). Trish's AI assistant will extract all ingredients and steps automatically! Supports iPhone HEIC photos.
+                                                Snap or upload photos of your recipe card (Front and optional Back). Fully supports iPhone HEIC photo formats!
                                             </p>
 
                                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -786,10 +752,10 @@ Return ONLY a valid JSON object matching this structure:
                                                     </div>
                                                     {frontImage ? (
                                                         <div className="space-y-3">
-                                                            <img src={frontImage} alt="Front of card" className="h-32 rounded-xl mx-auto object-cover shadow-sm w-full" />
+                                                            <img src={frontImage} alt="Front of card" className="h-36 rounded-xl mx-auto object-cover shadow-sm w-full" />
                                                             <div className="flex gap-2 justify-center">
                                                                 <label className="bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold px-3 py-1.5 rounded-xl text-xs cursor-pointer">
-                                                                    Retake
+                                                                    Change Photo
                                                                     <input type="file" accept="image/*,.heic,.heif" onChange={(e) => handleImageUpload(e, setFrontImage)} className="hidden" />
                                                                 </label>
                                                                 <button type="button" onClick={() => setFrontImage(null)} className="text-red-600 font-bold text-xs px-2 py-1.5 cursor-pointer">Remove</button>
@@ -799,10 +765,10 @@ Return ONLY a valid JSON object matching this structure:
                                                         <label className="cursor-pointer block py-4 my-auto">
                                                             <div className="text-3xl mb-1">📷</div>
                                                             <span className="font-bold text-slate-800 text-sm block mb-1">
-                                                                Take Front Photo
+                                                                Take or Select Front Photo
                                                             </span>
                                                             <span className="text-xs text-slate-500 block">
-                                                                Title & ingredients side
+                                                                Card title & ingredients side
                                                             </span>
                                                             <input type="file" accept="image/*,.heic,.heif" onChange={(e) => handleImageUpload(e, setFrontImage)} className="hidden" />
                                                         </label>
@@ -816,10 +782,10 @@ Return ONLY a valid JSON object matching this structure:
                                                     </div>
                                                     {backImage ? (
                                                         <div className="space-y-3">
-                                                            <img src={backImage} alt="Back of card" className="h-32 rounded-xl mx-auto object-cover shadow-sm w-full" />
+                                                            <img src={backImage} alt="Back of card" className="h-36 rounded-xl mx-auto object-cover shadow-sm w-full" />
                                                             <div className="flex gap-2 justify-center">
                                                                 <label className="bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold px-3 py-1.5 rounded-xl text-xs cursor-pointer">
-                                                                    Retake
+                                                                    Change Photo
                                                                     <input type="file" accept="image/*,.heic,.heif" onChange={(e) => handleImageUpload(e, setBackImage)} className="hidden" />
                                                                 </label>
                                                                 <button type="button" onClick={() => setBackImage(null)} className="text-red-600 font-bold text-xs px-2 py-1.5 cursor-pointer">Remove</button>
@@ -829,7 +795,7 @@ Return ONLY a valid JSON object matching this structure:
                                                         <label className="cursor-pointer block py-4 my-auto">
                                                             <div className="text-3xl mb-1">🔄</div>
                                                             <span className="font-bold text-slate-800 text-sm block mb-1">
-                                                                Take Back Photo
+                                                                Take or Select Back Photo
                                                             </span>
                                                             <span className="text-xs text-slate-500 block">
                                                                 Continued steps or notes
@@ -842,21 +808,20 @@ Return ONLY a valid JSON object matching this structure:
 
                                             {(frontImage || backImage) && (
                                                 <button 
-                                                    onClick={handleExtractRecipe}
+                                                    onClick={handleContinueWithPhoto}
                                                     disabled={isProcessing}
                                                     className="w-full bg-brand-500 text-white font-bold py-4 rounded-2xl text-lg shadow-md hover:bg-brand-600 transition-all flex items-center justify-center gap-2 cursor-pointer mt-2"
                                                 >
                                                     {isProcessing ? (
-                                                        <span>⏳ {processingStatus || 'Extracting Recipe...'}</span>
+                                                        <span>⏳ {processingStatus || 'Processing...'}</span>
                                                     ) : (
-                                                        <span>✨ Read Photos with AI Magic →</span>
+                                                        <span>📸 Use Card Photo & Fill Details →</span>
                                                     )}
                                                 </button>
                                             )}
                                         </div>
                                     )}
 
-                                    {}
                                     {!editingRecipeId && importTab === 'link' && (
                                         <div className="space-y-4">
                                             <div>
@@ -873,22 +838,55 @@ Return ONLY a valid JSON object matching this structure:
                                             </div>
 
                                             <button 
-                                                onClick={handleExtractRecipe}
-                                                disabled={isProcessing || !pastedLinkOrText.trim()}
-                                                className="w-full bg-brand-500 text-white font-bold py-4 rounded-2xl text-lg shadow-md hover:bg-brand-600 disabled:opacity-50 transition-all flex items-center justify-center gap-2 cursor-pointer"
+                                                onClick={() => {
+                                                    setFormData(prev => ({ ...prev, description: pastedLinkOrText.slice(0, 150) }));
+                                                    setImportTab('manual');
+                                                }}
+                                                className="w-full bg-brand-500 text-white font-bold py-4 rounded-2xl text-lg shadow-md hover:bg-brand-600 transition-all flex items-center justify-center gap-2 cursor-pointer"
                                             >
-                                                {isProcessing ? (
-                                                    <span>⏳ {processingStatus || 'Processing...'}</span>
-                                                ) : (
-                                                    <span>✨ Extract Recipe Details →</span>
-                                                )}
+                                                <span>✏️ Continue to Review Recipe Details →</span>
                                             </button>
                                         </div>
                                     )}
 
-                                    {}
                                     {(editingRecipeId || importTab === 'manual') && (
                                         <form onSubmit={handleSaveRecipe} className="space-y-4">
+                                            
+                                            {/* REFERENCE CARD PREVIEW (ON-SCREEN AID FOR TRISH) */}
+                                            {(frontImage || backImage) && !editingRecipeId && (
+                                                <div className="bg-orange-50 border border-orange-200 rounded-2xl p-3 space-y-2">
+                                                    <div className="flex justify-between items-center">
+                                                        <span className="text-xs font-bold text-brand-800 flex items-center gap-1.5">
+                                                            <span>📷</span> YOUR RECIPE CARD PHOTO REFERENCE
+                                                        </span>
+                                                        <button 
+                                                            type="button"
+                                                            onClick={() => setShowReferenceCard(!showReferenceCard)}
+                                                            className="text-xs font-bold text-brand-600 underline cursor-pointer"
+                                                        >
+                                                            {showReferenceCard ? 'Hide Card' : 'Show Card'}
+                                                        </button>
+                                                    </div>
+                                                    
+                                                    {showReferenceCard && (
+                                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                                                            {frontImage && (
+                                                                <div className="bg-white p-1 rounded-xl border border-orange-100 shadow-sm">
+                                                                    <span className="text-[10px] font-bold text-slate-500 block mb-1 text-center">FRONT PHOTO</span>
+                                                                    <img src={frontImage} alt="Recipe Card Front" className="w-full h-40 object-contain rounded-lg max-h-48" />
+                                                                </div>
+                                                            )}
+                                                            {backImage && (
+                                                                <div className="bg-white p-1 rounded-xl border border-orange-100 shadow-sm">
+                                                                    <span className="text-[10px] font-bold text-slate-500 block mb-1 text-center">BACK PHOTO</span>
+                                                                    <img src={backImage} alt="Recipe Card Back" className="w-full h-40 object-contain rounded-lg max-h-48" />
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+
                                             <div>
                                                 <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Recipe Title *</label>
                                                 <input 
@@ -958,20 +956,13 @@ Return ONLY a valid JSON object matching this structure:
                                                         type="text"
                                                         value={formData.imageUrl}
                                                         onChange={(e) => setFormData({...formData, imageUrl: e.target.value})}
-                                                        placeholder="Image URL or generated picture"
-                                                        className="flex-1 p-3 border border-slate-300 rounded-xl text-xs text-slate-600"
+                                                        placeholder="Card photo attached or image link"
+                                                        className="flex-1 p-3 border border-slate-300 rounded-xl text-xs text-slate-600 truncate"
                                                     />
-                                                    <button 
-                                                        type="button"
-                                                        onClick={async () => {
-                                                            if (!formData.title) return showAlert("Please enter a recipe title first!");
-                                                            const newImg = await generateAiImage(formData.title, formData.category);
-                                                            setFormData({...formData, imageUrl: newImg});
-                                                        }}
-                                                        className="bg-orange-100 hover:bg-orange-200 text-brand-700 text-xs font-bold px-3 py-3 rounded-xl whitespace-nowrap cursor-pointer"
-                                                    >
-                                                        ✨ Generate Photo
-                                                    </button>
+                                                    <label className="bg-orange-100 hover:bg-orange-200 text-brand-700 text-xs font-bold px-3 py-3 rounded-xl whitespace-nowrap cursor-pointer">
+                                                        📁 Upload New Photo
+                                                        <input type="file" accept="image/*,.heic,.heif" onChange={(e) => handleImageUpload(e, (url) => setFormData({...formData, imageUrl: url}))} className="hidden" />
+                                                    </label>
                                                 </div>
                                             </div>
 
@@ -1021,7 +1012,7 @@ Return ONLY a valid JSON object matching this structure:
                         </div>
                     )}
 
-                    {}
+                    {/* RECIPE DETAILS MODAL */}
                     {activeRecipe && !isKitchenMode && (
                         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-40 flex justify-center p-2 sm:p-4 overflow-y-auto">
                             <div className="bg-white w-full max-w-3xl rounded-3xl shadow-2xl overflow-hidden my-auto border border-slate-100 relative">
@@ -1146,7 +1137,7 @@ Return ONLY a valid JSON object matching this structure:
                         </div>
                     )}
 
-                    {}
+                    {/* KITCHEN MODE VIEW */}
                     {activeRecipe && isKitchenMode && (
                         <KitchenMode 
                             recipe={activeRecipe} 
