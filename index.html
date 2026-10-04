@@ -82,6 +82,40 @@
 
         const INITIAL_RECIPES = [
             {
+                id: "sample-3",
+                title: "Chicken Tetrazzini",
+                category: "Main Dishes",
+                prepTime: "20 mins",
+                cookTime: "35 mins",
+                servings: "8 servings",
+                imageUrl: "https://images.unsplash.com/photo-1621996346565-e3d5d6281288?auto=format&fit=crop&w=800&q=80",
+                description: "Comforting, creamy baked pasta dish with shredded rotisserie chicken, sour cream, cheddar, and parmesan cheese.",
+                ingredients: [
+                    "1 can Cream of Chicken soup",
+                    "1 can Cream of Mushroom soup",
+                    "1 can Cream of Celery soup",
+                    "16 oz Sour Cream",
+                    "1/2 cup butter, melted",
+                    "1/2 cup Chicken Broth",
+                    "1 tsp salt",
+                    "1/2 tsp black pepper",
+                    "1/4 tsp garlic powder",
+                    "1 lb Spaghetti, cooked al dente",
+                    "1 Rotisserie Chicken, boned & shredded",
+                    "2 cups Cheddar cheese, shredded",
+                    "2 tbsp Parmesan cheese",
+                    "Sliced mushrooms (optional)"
+                ],
+                instructions: [
+                    "Preheat oven to 350°F (175°C) and coat a 9x13-inch baking pan with non-stick cooking spray.",
+                    "In a large mixing bowl, whisk together Cream of Chicken soup, Cream of Mushroom soup, Cream of Celery soup, sour cream, melted butter, chicken broth, salt, pepper, and garlic powder until smooth.",
+                    "Stir in the cooked al dente spaghetti, shredded rotisserie chicken, optional mushrooms, and 1 cup of cheddar cheese until well combined.",
+                    "Transfer the mixture into the prepared 9x13 baking dish.",
+                    "Top evenly with the remaining 1 cup of cheddar cheese and 2 tbsp of parmesan cheese.",
+                    "Bake at 350°F for 30–35 minutes until hot, bubbly, and melted on top. Serve warm!"
+                ]
+            },
+            {
                 id: "sample-1",
                 title: "Trish's Golden Honey Butter Biscuits",
                 category: "Breads",
@@ -249,6 +283,35 @@
                 setNotice({ message, title });
             };
 
+            const processCanvasImage = (img, setImageSetter, slotKey) => {
+                try {
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+                    const maxDim = 1200;
+                    let w = img.naturalWidth || img.width || 800;
+                    let h = img.naturalHeight || img.height || 600;
+                    if (w > maxDim || h > maxDim) {
+                        if (w > h) {
+                            h = Math.round((h * maxDim) / w);
+                            w = maxDim;
+                        } else {
+                            w = Math.round((w * maxDim) / h);
+                            h = maxDim;
+                        }
+                    }
+                    canvas.width = w;
+                    canvas.height = h;
+                    ctx.drawImage(img, 0, 0, w, h);
+                    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+                    setImageSetter(dataUrl);
+                } catch (err) {
+                    console.error("Canvas draw error:", err);
+                    showAlert("Error processing picture. Please try another photo.");
+                } finally {
+                    if (slotKey) setUploadingState(prev => ({ ...prev, [slotKey]: false }));
+                }
+            };
+
             const handleImageUpload = async (e, setImageSetter, slotKey) => {
                 const file = e.target.files && e.target.files[0];
                 if (!file) return;
@@ -260,7 +323,8 @@
                 try {
                     let fileToRead = file;
                     const fileName = (file.name || '').toLowerCase();
-                    const isHeic = file.type.includes('heic') || file.type.includes('heif') || 
+                    const fileType = (file.type || '').toLowerCase();
+                    const isHeic = fileType.includes('heic') || fileType.includes('heif') || 
                                    fileName.endsWith('.heic') || fileName.endsWith('.heif');
 
                     if (isHeic && window.heic2any) {
@@ -276,48 +340,37 @@
                         }
                     }
 
-                    const reader = new FileReader();
-                    reader.onerror = () => {
-                        showAlert("Could not read image file. Please try selecting the photo again.", "File Error");
-                        if (slotKey) setUploadingState(prev => ({ ...prev, [slotKey]: false }));
-                    };
-
-                    reader.onloadend = () => {
-                        const img = new Image();
-                        img.onerror = () => {
-                            showAlert("Unable to display this picture format. Try taking a fresh photo or screenshot.", "Image Format Error");
+                    const objectUrl = URL.createObjectURL(fileToRead);
+                    const img = new Image();
+                    
+                    img.onerror = () => {
+                        URL.revokeObjectURL(objectUrl);
+                        const reader = new FileReader();
+                        reader.onload = (evt) => {
+                            const fallbackImg = new Image();
+                            fallbackImg.onerror = () => {
+                                showAlert("Unable to display this picture format. Try saving it as JPEG or PNG, or taking a screenshot of the photo.", "Image Format Error");
+                                if (slotKey) setUploadingState(prev => ({ ...prev, [slotKey]: false }));
+                            };
+                            fallbackImg.onload = () => {
+                                processCanvasImage(fallbackImg, setImageSetter, slotKey);
+                            };
+                            fallbackImg.src = evt.target.result;
+                        };
+                        reader.onerror = () => {
+                            showAlert("Could not read image file. Please try selecting the photo again.", "File Error");
                             if (slotKey) setUploadingState(prev => ({ ...prev, [slotKey]: false }));
                         };
-                        img.onload = () => {
-                            try {
-                                const canvas = document.createElement('canvas');
-                                const ctx = canvas.getContext('2d');
-                                const maxDim = 1200;
-                                let w = img.width;
-                                let h = img.height;
-                                if (w > maxDim || h > maxDim) {
-                                    if (w > h) {
-                                        h = Math.round((h * maxDim) / w);
-                                        w = maxDim;
-                                    } else {
-                                        w = Math.round((w * maxDim) / h);
-                                        h = maxDim;
-                                    }
-                                }
-                                canvas.width = w;
-                                canvas.height = h;
-                                ctx.drawImage(img, 0, 0, w, h);
-                                const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
-                                setImageSetter(dataUrl);
-                            } catch (err) {
-                                showAlert("Error processing picture. Please try another photo.");
-                            } finally {
-                                if (slotKey) setUploadingState(prev => ({ ...prev, [slotKey]: false }));
-                            }
-                        };
-                        img.src = reader.result;
+                        reader.readAsDataURL(fileToRead);
                     };
-                    reader.readAsDataURL(fileToRead);
+
+                    img.onload = () => {
+                        URL.revokeObjectURL(objectUrl);
+                        processCanvasImage(img, setImageSetter, slotKey);
+                    };
+
+                    img.src = objectUrl;
+
                 } catch (err) {
                     showAlert("An error occurred while opening the photo.");
                     if (slotKey) setUploadingState(prev => ({ ...prev, [slotKey]: false }));
